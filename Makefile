@@ -14,13 +14,13 @@
 
 .PHONY: test
 
-# VERSION is currently based on the last commit
-VERSION?=$(shell git describe --tags --match "v*")
-COMMIT=$(shell git rev-parse HEAD)
+# VERSION is based on a date stamp plus the last commit
+VERSION?=v$(shell date +%Y%m%d)-$(shell git describe --tags --match "v*")
 BUILD=$(shell date +%FT%T%z)
 LDFLAG_LOCATION=sigs.k8s.io/descheduler/cmd/descheduler/app
+ARCHS = amd64 arm64
 
-LDFLAGS=-ldflags "-X ${LDFLAG_LOCATION}.version=${VERSION} -X ${LDFLAG_LOCATION}.buildDate=${BUILD} -X ${LDFLAG_LOCATION}.gitCommit=${COMMIT}"
+LDFLAGS=-ldflags "-X ${LDFLAG_LOCATION}.version=${VERSION} -X ${LDFLAG_LOCATION}.buildDate=${BUILD}"
 
 GOLANGCI_VERSION := v1.30.0
 HAS_GOLANGCI := $(shell ls _output/bin/golangci-lint)
@@ -48,18 +48,40 @@ all: build
 build:
 	CGO_ENABLED=0 go build ${LDFLAGS} -o _output/bin/descheduler sigs.k8s.io/descheduler/cmd/descheduler
 
+build.amd64:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -o _output/bin/descheduler sigs.k8s.io/descheduler/cmd/descheduler
+
+build.arm64:
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ${LDFLAGS} -o _output/bin/descheduler sigs.k8s.io/descheduler/cmd/descheduler
+
 dev-image: build
 	docker build -f Dockerfile.dev -t $(IMAGE) .
 
 image:
-	docker build -t $(IMAGE) .
+	docker build --build-arg VERSION="$(VERSION)" --build-arg ARCH="amd64" -t $(IMAGE) .
 
-push-container-to-gcloud: image
+image.amd64:
+	docker build --build-arg VERSION="$(VERSION)" --build-arg ARCH="amd64" -t $(IMAGE)-amd64 .
+
+image.arm64:
+	docker build --build-arg VERSION="$(VERSION)" --build-arg ARCH="arm64" -t $(IMAGE)-arm64 .
+
+push: image
 	gcloud auth configure-docker
 	docker tag $(IMAGE) $(IMAGE_GCLOUD)
 	docker push $(IMAGE_GCLOUD)
 
-push: push-container-to-gcloud
+push-all: image.amd64 image.arm64
+	gcloud auth configure-docker
+	for arch in $(ARCHS); do \
+		docker tag $(IMAGE)-$${arch} $(IMAGE_GCLOUD)-$${arch} ;\
+		docker push $(IMAGE_GCLOUD)-$${arch} ;\
+	done
+	DOCKER_CLI_EXPERIMENTAL=enabled docker manifest create $(IMAGE_GCLOUD) $(addprefix --amend $(IMAGE_GCLOUD)-, $(ARCHS))
+	for arch in $(ARCHS); do \
+		DOCKER_CLI_EXPERIMENTAL=enabled docker manifest annotate --arch $${arch} $(IMAGE_GCLOUD) $(IMAGE_GCLOUD)-$${arch} ;\
+	done
+	DOCKER_CLI_EXPERIMENTAL=enabled docker manifest push $(IMAGE_GCLOUD) ;\
 
 clean:
 	rm -rf _output
